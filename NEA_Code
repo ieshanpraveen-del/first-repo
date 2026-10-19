@@ -1,0 +1,287 @@
+from functools import total_ordering
+import re
+from tkinter import *
+from tkinter import ttk
+import csv
+from turtle import position
+import openpyxl
+import sqlite3 
+import pandas as pd
+from pulp import *
+
+# I would like to use OOP on the tkinter windows so I plan to change this in the future
+
+
+def player_list():
+    playerlist = Tk()
+    playerlist.title("Player List")
+    
+    def load_data(): # THIS WILL BE CHNAGES AS I NEED TO ACCEPT CSV FILES
+        path =("C:/Users/iesha/OneDrive/Desktop/NEA/basketball_players_with_ID.csv")
+        with open(path, 'r', newline='') as csvfile:
+          read_csv = csv.reader(csvfile)
+          list_values = list(read_csv)
+        cols = list_values[0]
+        tree = ttk.Treeview(playerlist, columns= cols, show = "headings")
+        for col_name in cols:
+            tree.heading(col_name, text = col_name)
+        tree.pack(expand = True, fill = 'y')
+        for value_tuple in list_values[1:]:
+            tree.insert('', END, values = value_tuple)
+
+    load_data()
+
+
+def Optimiser():  # OPTIMISER CODE(VERY IMPORTANT)
+    optimiser_screen = Tk()
+    optimiser_screen.title("Optimiser")
+    optimiser_screen.geometry('250x250')
+
+    def show_list():
+        playerlist = Tk()
+        playerlist.title("Player List")
+        path =("C:/Users/iesha/fantasy_lineups.xlsx")
+        workbook = openpyxl.load_workbook(path)
+        sheet = workbook.active
+
+        list_values = list(sheet.values)
+        cols = list_values[0]
+        tree = ttk.Treeview(playerlist, columns= cols, show = "headings")
+
+        scrollbar = ttk.Scrollbar(playerlist, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=scrollbar.set)
+        scrollbar.pack(fill='x')
+
+        for col_name in cols:
+            tree.heading(col_name, text = col_name)
+        tree.pack(expand = True, fill = 'y')
+        for value_tuple in list_values[1:]:
+            tree.insert('', END, values = value_tuple)
+
+    def run_optimiser():
+
+        players = pd.read_csv("C:/Users/iesha/OneDrive/Desktop/NEA/basketball_players_with_ID.csv") # import csv file
+        usecols = ['PlayerID','Name', 'Position', 'FantasyPPG'] # columns to use
+
+        # Create workbook for output in Excel
+        wb = openpyxl.Workbook()
+        ws = wb.active
+
+        # Add headers to Excel spreadsheet
+        headers = ['PG1', 'PG2', 'SG1', 'SG2', 'SF1', 'SF2', 'PF1', 'PF2', 'C', 'Total Points']
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col).value = header
+            ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
+
+        # Group the players by the position
+        availables = players.groupby(['Position', 'PlayerID', 'FantasyPPG', 'Name']).size().reset_index(name='count')
+
+        # Initialize points dictionary for each position
+        points = {}
+        for pos in availables.Position.unique():
+            availables_pos = availables[availables.Position == pos]
+            pos_points = dict(zip(availables_pos['PlayerID'], availables_pos['FantasyPPG']))
+            points[pos] = pos_points
+
+        # Position requirements for lineup
+        pos_num_available = {
+            "PG": 2,  # Point Guards
+            "SG": 2,  # Shooting Guards
+            "SF": 2,  # Small Forwards
+            "PF": 2,  # Power Forwards
+            "C": 1   # Centers
+        }
+
+        # Generate multiple lineups
+        previous_lineups = []  # Store previous lineups so they won't duplicate
+
+        for lineup in range(1, 10):
+            # Create binary variables for each player in each position
+            _vars = {k: LpVariable.dicts(k, v.keys(), cat='Binary') for k, v in points.items()}
+
+            # Create the optimization problem
+            prob = LpProblem(f"Fantasy_Lineup_{lineup}", LpMaximize)
+    
+            # Objective function: maximize total fantasy points
+            total_points = []
+            for pos, players_dict in points.items():
+                for player_id, player_points in players_dict.items():
+                    total_points.append(player_points * _vars[pos][player_id])
+
+            prob += lpSum(total_points)
+
+            # Position constraints: exactly the required number of players per position
+            for pos in points.keys():
+                prob += lpSum([_vars[pos][player_id] for player_id in points[pos]]) == pos_num_available[pos]
+            # Don't count lineups we've already found (exclude previous lineups)
+            for prev_lineup in previous_lineups:
+                prob += lpSum([_vars[pos][player_id] for pos, player_id in prev_lineup]) <= len(prev_lineup) - 1
+
+            # Solve the problem
+            prob.solve()
+
+            # Check if solution was found
+            if prob.status != 1:
+                print(f"No optimal solution found for lineup {lineup}")
+                break
+
+            # Extract the selected players and calculate total score
+            selected_players = []
+            total_score = 0
+
+            # Dictionary to organize players by position with counts
+            lineup_players = {'PG': [], 'SG': [], 'SF': [], 'PF': [], 'C': []}
+
+            for pos in points.keys():
+                for player_id in points[pos]:
+                    if _vars[pos][player_id].varValue == 1:
+                        # Find player name
+                        player_name = availables[(availables.PlayerID == player_id) &
+                                               (availables.Position == pos)]['Name'].iloc[0]
+                        player_points = points[pos][player_id]
+                
+                        # Add to position list
+                        lineup_players[pos].append(f"{player_name} ({player_points:.1f})")
+                
+                        # Constraint track
+                        selected_players.append((pos, player_id))
+                        total_score += player_points
+
+            # Write to Excel in correct column order
+            row = lineup + 1
+            col = 1
+
+            # Fill in each position one at a time
+            for pos in ['PG', 'SG', 'SF', 'PF', 'C']:
+                players_in_pos = lineup_players[pos]
+                for i in range(pos_num_available[pos]):
+                    if i < len(players_in_pos):
+                        ws.cell(row=row, column=col).value = players_in_pos[i]
+                    col += 1
+
+            # Add total score
+            ws.cell(row=row, column=col).value = round(total_score, 2)
+
+            # Cache this lineup to skip in subsequent iterations
+            previous_lineups.append(selected_players)
+    
+            print(f"Lineup {lineup}: Total Fantasy Points = {total_score:.2f}")
+            print(f"PG: {lineup_players['PG']}")
+            print(f"SG: {lineup_players['SG']}")
+            print(f"SF: {lineup_players['SF']}")
+            print(f"PF: {lineup_players['PF']}")
+            print(f"C: {lineup_players['C']}")
+            print("-" * 50)
+
+        # Save the Excel file
+        wb.save("fantasy_lineups.xlsx")
+        show_list()
+
+
+    optimiser_button = Button(optimiser_screen, text = "Run optimiser", command = run_optimiser)
+
+    optimiser_button.grid(row = 0, column = 0)
+
+
+
+def selectionscreen(): #main screen for the program
+
+    selection_screen = Tk()
+    selection_screen.title("Selection screen")
+    selection_screen.geometry('250x250')
+    heading_text = Label(selection_screen, text = "Hello")
+    list_selection = Button(selection_screen, text = "View player list", command = player_list)
+    heading_text.grid(row = 0, column = 0)
+    list_selection.grid(row = 1, column = 0)
+    optimiser_creator = Button(selection_screen, text = "Run optimiser", command = Optimiser)
+    optimiser_creator.grid(row = 2, column = 0)
+
+def register():
+
+    def signup_database():
+        conn = sqlite3.connect("login.db")
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS test(username text PRIMARY KEY, password text)")
+
+        try: # inserts the username and password into the database
+            cur.execute("INSERT INTO test Values(?,?)", (username_entry.get() ,password_entry.get()))
+            confirm_window = Label(window, text = "Account Created")
+            confirm_window.grid(row = 4, column = 0)
+            conn.commit()
+            conn.close()
+        except sqlite3.IntegrityError: # returns an error if the username already exists
+            error_window = Label(window, text = "Account already exist")
+            error_window.grid(row = 4, column = 0)
+
+
+    window = Tk()
+    window.title("Login")
+    window.geometry('250x250')
+
+
+    register_label = Label(window, text = "Sign up")
+    register_enter_button = Button(window, text = "Sign up", command = signup_database)
+    username_label = Label(window, text = "Username")
+    password_label = Label(window, text = "Password")
+    username_entry = Entry(window)
+    password_entry = Entry(window)
+
+    register_label.grid(row = 0, column = 0, columnspan = 2)
+    username_label.grid(row = 1, column = 0)
+    username_entry.grid(row = 1, column = 1)
+    password_label.grid(row = 2, column = 0)
+    password_entry.grid(row = 2, column = 1)
+    register_enter_button.grid(row = 3, column = 0) # register account to use the system
+
+def login():
+
+    def login_database():
+        conn = sqlite3.connect("login.db") # accesses the database
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM test WHERE username =? AND password=?", (username_entry.get(),password_entry.get())) #searches for the username and password entered
+        row =cur.fetchall() # finds the example of username and password
+        conn.close()
+        if row !=[]:
+            user_name = row[0][1]
+            confirm_label.config(text = "user found")
+            window.destroy()
+            title.destroy()
+            selectionscreen() 
+        else:
+            confirm_label.config(text = "username or password may be incorrect")
+
+
+    window = Tk()
+    window.title("Login")
+    window.geometry('250x250')
+    
+
+
+    login_label = Label(window, text = "Login")
+    login_enter_button = Button(window, text = "Login", command = login_database)
+    username_label = Label(window, text = "Username")
+    password_label = Label(window, text = "Password")
+    username_entry = Entry(window)
+    password_entry = Entry(window)
+    confirm_label =Label(window)
+
+    login_label.grid(row = 0, column = 0, columnspan = 2)
+    username_label.grid(row = 1, column = 0)
+    username_entry.grid(row = 1, column = 1)
+    password_label.grid(row = 2, column = 0)
+    password_entry.grid(row = 2, column = 1)
+    login_enter_button.grid(row = 3, column = 0)
+    confirm_label.grid(row = 4, column = 0) # login to use the system
+
+
+title = Tk("NBA Draft Optimiser") 
+title.geometry("250x250")
+header = Label(title, text = "NBA Draft Optimiser",)
+register_button = Button(title, text = "Register", command = register)
+login_button = Button(title, text = "Login", command = login)
+
+header.grid(row = 0, column = 0)
+register_button.grid(row = 1, column = 0)
+login_button.grid(row = 1, column = 1)
+
+title.mainloop()
